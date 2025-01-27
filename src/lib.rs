@@ -11,11 +11,9 @@ use tiff::TiffResult;
 pub use crate::geo_key_directory::*;
 
 use crate::coordinate_transform::*;
-use crate::decoder_ext::*;
 use crate::raster_data::*;
 
 mod coordinate_transform;
-mod decoder_ext;
 mod geo_key_directory;
 mod raster_data;
 
@@ -51,12 +49,52 @@ impl GeoTiff {
     pub fn read<R: Read + Seek>(reader: R) -> TiffResult<Self> {
         let mut decoder = Decoder::new(reader)?;
 
-        let geo_key_directory = decoder.geo_key_directory()?;
-        let coordinate_transform = decoder.coordinate_transform()?;
+        let geo_key_directory = {
+            if let Some(directory) = decoder.find_tag(Tag::GeoKeyDirectoryTag)? {
+                let directory = directory.into_u16_vec()?;
+                let double_values = match decoder.find_tag(Tag::GeoDoubleParamsTag)? {
+                    Some(v) => v.into_f64_vec()?,
+                    None => Vec::new(),
+                };
+                let ascii_values = match decoder.find_tag(Tag::GeoAsciiParamsTag)? {
+                    Some(v) => v.into_string()?,
+                    None => String::new(),
+                };
+                GeoKeyDirectory::from_tag_data(&directory, &double_values, &ascii_values)?
+            } else {
+                GeoKeyDirectory::default()
+            }
+        };
 
-        let (raster_width, raster_height) = decoder
-            .dimensions()
-            .map(|(width, height)| (width as usize, height as usize))?;
+        let coordinate_transform = {
+            let pixel_scale = match decoder.find_tag(Tag::ModelPixelScaleTag)? {
+                Some(v) => Some(v.into_f64_vec()?),
+                None => None,
+            };
+            let tie_points = match decoder.find_tag(Tag::ModelTiepointTag)? {
+                Some(v) => Some(v.into_f64_vec()?),
+                None => None,
+            };
+            let model_transformation = match decoder.find_tag(Tag::ModelTransformationTag)? {
+                Some(v) => Some(v.into_f64_vec()?),
+                None => None,
+            };
+
+            if (&pixel_scale, &tie_points, &model_transformation) == (&None, &None, &None) {
+                None
+            } else {
+                Some(CoordinateTransform::from_tag_data(
+                    pixel_scale,
+                    tie_points,
+                    model_transformation,
+                )?)
+            }
+        };
+
+        let (raster_width, raster_height) = decoder.dimensions()?;
+        let raster_width = raster_width as usize;
+        let raster_height = raster_height as usize;
+
         let num_samples = match decoder.find_tag(Tag::SamplesPerPixel)? {
             None => 1,
             Some(value) => value.into_u16()? as usize,

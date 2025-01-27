@@ -60,9 +60,9 @@ pub struct GeoKeyDirectory {
 
 impl GeoKeyDirectory {
     pub(crate) fn from_tag_data(
-        directory_data: Vec<u16>,
-        double_params_data: Vec<f64>,
-        ascii_params_data: String,
+        directory_data: &[u16],
+        double_params_data: &[f64],
+        ascii_params_data: &str,
     ) -> TiffResult<Self> {
         let mut directory = Self::default();
         if directory_data.len() < 4 {

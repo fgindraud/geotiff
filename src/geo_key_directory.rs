@@ -59,10 +59,10 @@ pub struct GeoKeyDirectory {
 }
 
 impl GeoKeyDirectory {
-    pub(crate) fn from_tag_data(
+    pub fn from_tag_data(
         directory_data: &[u16],
-        double_params_data: &[f64],
-        ascii_params_data: &str,
+        double_params: &[f64],
+        ascii_params: &str,
     ) -> TiffResult<Self> {
         let mut directory = Self::default();
         if directory_data.len() < 4 {
@@ -82,25 +82,23 @@ impl GeoKeyDirectory {
             ));
         }
 
-        for [key_id, tiff_tag_location, count, value_or_offset] in directory_data[4..]
-            .chunks(4)
-            .filter_map(|c| <&[u16; 4]>::try_from(c).ok())
-        {
-            let key_tag = GeoKeyDirectoryTag::try_from(*key_id).map_err(|_| {
-                TiffError::FormatError(TiffFormatError::Format(format!(
-                    "Unknown GeoKeyDirectoryTag: {key_id}"
-                )))
-            })?;
-            let location_tag = Tag::from_u16(*tiff_tag_location);
+        for entry in directory_data[4..].chunks_exact(4) {
+            let entry = DirectoryEntry {
+                key_tag: GeoKeyDirectoryTag::try_from(entry[0]).map_err(|_| {
+                    TiffError::FormatError(TiffFormatError::Format(format!(
+                        "Unknown GeoKeyDirectoryTag: {}",
+                        entry[0]
+                    )))
+                })?,
+                location_tag: Tag::from_u16(entry[1]),
+                count: entry[2],
+                value_or_offset: entry[3],
+            };
 
-            match key_tag {
-                GeoKeyDirectoryTag::ModelType => {
-                    directory.model_type =
-                        Self::get_short(key_tag, location_tag, *count, *value_or_offset)?.into()
-                }
+            match entry.key_tag {
+                GeoKeyDirectoryTag::ModelType => directory.model_type = Some(entry.short()?),
                 GeoKeyDirectoryTag::RasterType => {
-                    let raster_type =
-                        Self::get_short(key_tag, location_tag, *count, *value_or_offset)?;
+                    let raster_type = entry.short()?;
                     directory.raster_type =
                         Some(RasterType::try_from(raster_type).map_err(|_| {
                             TiffError::FormatError(TiffFormatError::Format(format!(
@@ -109,439 +107,216 @@ impl GeoKeyDirectory {
                         })?)
                 }
                 GeoKeyDirectoryTag::Citation => {
-                    directory.citation = Self::get_string(
-                        &ascii_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.citation = Some(entry.string(ascii_params)?)
                 }
                 GeoKeyDirectoryTag::GeographicType => {
-                    directory.geographic_type =
-                        Self::get_short(key_tag, location_tag, *count, *value_or_offset)?.into()
+                    directory.geographic_type = Some(entry.short()?)
                 }
                 GeoKeyDirectoryTag::GeogCitation => {
-                    directory.geog_citation = Self::get_string(
-                        &ascii_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.geog_citation = Some(entry.string(ascii_params)?)
                 }
                 GeoKeyDirectoryTag::GeogGeodeticDatum => {
-                    directory.geog_geodetic_datum =
-                        Self::get_short(key_tag, location_tag, *count, *value_or_offset)?.into()
+                    directory.geog_geodetic_datum = Some(entry.short()?)
                 }
                 GeoKeyDirectoryTag::GeogPrimeMeridian => {
-                    directory.geog_prime_meridian =
-                        Self::get_short(key_tag, location_tag, *count, *value_or_offset)?.into()
+                    directory.geog_prime_meridian = Some(entry.short()?)
                 }
                 GeoKeyDirectoryTag::GeogLinearUnits => {
-                    directory.geog_linear_units =
-                        Self::get_short(key_tag, location_tag, *count, *value_or_offset)?.into()
+                    directory.geog_linear_units = Some(entry.short()?)
                 }
                 GeoKeyDirectoryTag::GeogLinearUnitSize => {
-                    directory.geog_linear_unit_size = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.geog_linear_unit_size = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::GeogAngularUnits => {
-                    directory.geog_angular_units =
-                        Self::get_short(key_tag, location_tag, *count, *value_or_offset)?.into()
+                    directory.geog_angular_units = Some(entry.short()?)
                 }
                 GeoKeyDirectoryTag::GeogAngularUnitSize => {
-                    directory.geog_angular_unit_size = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.geog_angular_unit_size = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::GeogEllipsoid => {
-                    directory.geog_ellipsoid =
-                        Self::get_short(key_tag, location_tag, *count, *value_or_offset)?.into()
+                    directory.geog_ellipsoid = Some(entry.short()?)
                 }
                 GeoKeyDirectoryTag::GeogSemiMajorAxis => {
-                    directory.geog_semi_major_axis = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.geog_semi_major_axis = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::GeogSemiMinorAxis => {
-                    directory.geog_semi_minor_axis = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.geog_semi_minor_axis = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::GeogInvFlattening => {
-                    directory.geog_inv_flattening = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.geog_inv_flattening = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::GeogAzimuthUnits => {
-                    directory.geog_azimuth_units =
-                        Self::get_short(key_tag, location_tag, *count, *value_or_offset)?.into()
+                    directory.geog_azimuth_units = Some(entry.short()?)
                 }
                 GeoKeyDirectoryTag::GeogPrimeMeridianLong => {
-                    directory.geog_prime_meridian_long = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.geog_prime_meridian_long = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::ProjectedType => {
-                    directory.projected_type =
-                        Self::get_short(key_tag, location_tag, *count, *value_or_offset)?.into()
+                    directory.projected_type = Some(entry.short()?)
                 }
                 GeoKeyDirectoryTag::ProjCitation => {
-                    directory.proj_citation = Self::get_string(
-                        &ascii_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.proj_citation = Some(entry.string(ascii_params)?)
                 }
-                GeoKeyDirectoryTag::Projection => {
-                    directory.projection =
-                        Self::get_short(key_tag, location_tag, *count, *value_or_offset)?.into()
-                }
+                GeoKeyDirectoryTag::Projection => directory.projection = Some(entry.short()?),
                 GeoKeyDirectoryTag::ProjCoordTrans => {
-                    directory.proj_coord_trans =
-                        Self::get_short(key_tag, location_tag, *count, *value_or_offset)?.into()
+                    directory.proj_coord_trans = Some(entry.short()?)
                 }
                 GeoKeyDirectoryTag::ProjLinearUnits => {
-                    directory.proj_linear_units =
-                        Self::get_short(key_tag, location_tag, *count, *value_or_offset)?.into()
+                    directory.proj_linear_units = Some(entry.short()?)
                 }
                 GeoKeyDirectoryTag::ProjLinearUnitSize => {
-                    directory.proj_linear_unit_size = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.proj_linear_unit_size = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::ProjStdParallel1 => {
-                    directory.proj_std_parallel1 = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.proj_std_parallel1 = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::ProjStdParallel2 => {
-                    directory.proj_std_parallel2 = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.proj_std_parallel2 = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::ProjNatOriginLong => {
-                    directory.proj_nat_origin_long = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.proj_nat_origin_long = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::ProjNatOriginLat => {
-                    directory.proj_nat_origin_lat = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.proj_nat_origin_lat = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::ProjFalseEasting => {
-                    directory.proj_false_easting = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.proj_false_easting = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::ProjFalseNorthing => {
-                    directory.proj_false_northing = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.proj_false_northing = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::ProjFalseOriginLong => {
-                    directory.proj_false_origin_long = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.proj_false_origin_long = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::ProjFalseOriginLat => {
-                    directory.proj_false_origin_lat = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.proj_false_origin_lat = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::ProjFalseOriginEasting => {
-                    directory.proj_false_origin_easting = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.proj_false_origin_easting = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::ProjFalseOriginNorthing => {
-                    directory.proj_false_origin_northing = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.proj_false_origin_northing = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::ProjCenterLong => {
-                    directory.proj_center_long = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.proj_center_long = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::ProjCenterLat => {
-                    directory.proj_center_lat = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.proj_center_lat = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::ProjCenterEasting => {
-                    directory.proj_center_easting = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.proj_center_easting = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::ProjCenterNorthing => {
-                    directory.proj_center_northing = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.proj_center_northing = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::ProjScaleAtNatOrigin => {
-                    directory.proj_scale_at_nat_origin = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.proj_scale_at_nat_origin = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::ProjScaleAtCenter => {
-                    directory.proj_scale_at_center = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.proj_scale_at_center = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::ProjAzimuthAngle => {
-                    directory.proj_azimuth_angle = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.proj_azimuth_angle = Some(entry.double(double_params)?)
                 }
                 GeoKeyDirectoryTag::ProjStraightVertPoleLong => {
-                    directory.proj_straight_vert_pole_long = Self::get_double(
-                        &double_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.proj_straight_vert_pole_long = Some(entry.double(double_params)?)
                 }
-                GeoKeyDirectoryTag::Vertical => {
-                    directory.vertical =
-                        Self::get_short(key_tag, location_tag, *count, *value_or_offset)?.into()
-                }
+                GeoKeyDirectoryTag::Vertical => directory.vertical = Some(entry.short()?),
                 GeoKeyDirectoryTag::VerticalCitation => {
-                    directory.vertical_citation = Self::get_string(
-                        &ascii_params_data,
-                        key_tag,
-                        location_tag,
-                        *count,
-                        *value_or_offset,
-                    )?
-                    .into()
+                    directory.vertical_citation = Some(entry.string(ascii_params)?)
                 }
                 GeoKeyDirectoryTag::VerticalDatum => {
-                    directory.vertical_datum =
-                        Self::get_short(key_tag, location_tag, *count, *value_or_offset)?.into()
+                    directory.vertical_datum = Some(entry.short()?)
                 }
                 GeoKeyDirectoryTag::VerticalUnits => {
-                    directory.vertical_units =
-                        Self::get_short(key_tag, location_tag, *count, *value_or_offset)?.into()
+                    directory.vertical_units = Some(entry.short()?)
                 }
             }
         }
 
         Ok(directory)
     }
+}
 
-    fn get_short(
-        key_tag: GeoKeyDirectoryTag,
-        location_tag: Option<Tag>,
-        count: u16,
-        offset: u16,
-    ) -> TiffResult<u16> {
+struct DirectoryEntry {
+    key_tag: GeoKeyDirectoryTag,
+    location_tag: Option<Tag>,
+    count: u16,
+    value_or_offset: u16,
+}
+
+impl DirectoryEntry {
+    fn short(&self) -> TiffResult<u16> {
         // Check that TIFFTagLocation == 0 so value is of SHORT type
-        if location_tag.is_some() {
+        if self.location_tag.is_some() {
             return Err(TiffError::FormatError(TiffFormatError::Format(format!(
-                "Key `{key_tag:?}` did not have the expected SHORT value type."
+                "Key `{:?}` did not have the expected SHORT value type.",
+                self.key_tag
             ))));
         }
 
-        if count != 1 {
+        if self.count != 1 {
             return Err(TiffError::FormatError(TiffFormatError::Format(format!(
-                "Unexpected count: expected 1, got {count}."
+                "Unexpected count: expected 1, got {}.",
+                self.count
             ))));
         }
 
-        Ok(offset)
+        Ok(self.value_or_offset)
     }
 
-    fn get_double(
-        data: &[f64],
-        key_tag: GeoKeyDirectoryTag,
-        location_tag: Option<Tag>,
-        count: u16,
-        offset: u16,
-    ) -> TiffResult<f64> {
-        if location_tag != Some(Tag::GeoDoubleParamsTag) {
+    fn double(&self, data: &[f64]) -> TiffResult<f64> {
+        if self.location_tag != Some(Tag::GeoDoubleParamsTag) {
             return Err(TiffError::FormatError(TiffFormatError::Format(format!(
-                "Key `{key_tag:?}` did not have the expected DOUBLE value type."
+                "Key `{:?}` did not have the expected DOUBLE value type.",
+                self.key_tag
             ))));
         }
 
-        if count != 1 {
+        if self.count != 1 {
             return Err(TiffError::FormatError(TiffFormatError::Format(format!(
-                "Unexpected count: expected 1, got {count}."
+                "Unexpected count: expected 1, got {}.",
+                self.count
             ))));
         }
 
-        match data.get(offset as usize) {
+        match data.get(self.value_or_offset as usize) {
             None => Err(TiffError::FormatError(TiffFormatError::Format(format!(
-                "Offset out of bounds: the length is {} but the offset is {offset}",
-                data.len()
+                "Offset out of bounds: the length is {} but the offset is {}",
+                data.len(),
+                self.value_or_offset
             )))),
             Some(value) => Ok(*value),
         }
     }
 
-    fn get_string(
-        data: &str,
-        key_tag: GeoKeyDirectoryTag,
-        location_tag: Option<Tag>,
-        count: u16,
-        offset: u16,
-    ) -> TiffResult<String> {
-        let len = data.len();
-
-        if location_tag != Some(Tag::GeoAsciiParamsTag) {
+    fn string(&self, data: &str) -> TiffResult<String> {
+        if self.location_tag != Some(Tag::GeoAsciiParamsTag) {
             return Err(TiffError::FormatError(TiffFormatError::Format(format!(
-                "Key `{key_tag:?}` did not have the expected ASCII value type."
+                "Key `{:?}` did not have the expected ASCII value type.",
+                self.key_tag
             ))));
         }
 
-        let start = offset as usize;
-        if start >= len {
+        let start = self.value_or_offset as usize;
+        if start >= data.len() {
             return Err(TiffError::FormatError(TiffFormatError::Format(format!(
-                "Start offset out of bounds: the length is {} but the offset is {offset}.",
-                len
+                "Start offset out of bounds: the length is {} but the offset is {}.",
+                data.len(),
+                self.value_or_offset
             ))));
         }
 
-        let end = (offset + count - 1) as usize;
-        if end >= len {
+        let end = (self.value_or_offset + self.count - 1) as usize;
+        if end >= data.len() {
             return Err(TiffError::FormatError(TiffFormatError::Format(format!(
-                "End offset out of bounds: the length is {} but the offset is {offset}.",
-                len
+                "End offset out of bounds: the length is {} but the offset is {}.",
+                data.len(),
+                self.value_or_offset
             ))));
         }
 
-        Ok(data[start..end].into())
+        Ok(String::from(&data[start..end]))
     }
 }
 

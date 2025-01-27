@@ -52,15 +52,15 @@ impl GeoTiff {
         let geo_key_directory = {
             if let Some(directory) = decoder.find_tag(Tag::GeoKeyDirectoryTag)? {
                 let directory = directory.into_u16_vec()?;
-                let double_values = match decoder.find_tag(Tag::GeoDoubleParamsTag)? {
+                let double_params = match decoder.find_tag(Tag::GeoDoubleParamsTag)? {
                     Some(v) => v.into_f64_vec()?,
                     None => Vec::new(),
                 };
-                let ascii_values = match decoder.find_tag(Tag::GeoAsciiParamsTag)? {
+                let ascii_params = match decoder.find_tag(Tag::GeoAsciiParamsTag)? {
                     Some(v) => v.into_string()?,
                     None => String::new(),
                 };
-                GeoKeyDirectory::from_tag_data(&directory, &double_values, &ascii_values)?
+                GeoKeyDirectory::from_tag_data(&directory, &double_params, &ascii_params)?
             } else {
                 GeoKeyDirectory::default()
             }

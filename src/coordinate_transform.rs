@@ -1,16 +1,6 @@
-#[cfg(feature = "tie-points")]
-use std::rc::Rc;
-
-#[cfg(feature = "tie-points")]
-use geo_index::rtree::OwnedRTree;
 use geo_types::Coord;
 use tiff::{TiffError, TiffFormatError, TiffResult};
 
-#[cfg(feature = "tie-points")]
-use crate::coordinate_transform::tie_points::Face;
-
-mod affine_transform;
-mod tie_point_and_pixel_scale;
 #[cfg(feature = "tie-points")]
 mod tie_points;
 
@@ -23,22 +13,10 @@ const MODEL_TRANSFORMATION_TAG: &str = "ModelTransformationTag";
 /// Ref: https://docs.ogc.org/is/19-008r4/19-008r4.html#_raster_to_model_coordinate_transformation_requirements
 #[derive(Debug)]
 pub enum CoordinateTransform {
-    AffineTransform {
-        transform: [f64; 6],
-        inverse_transform: [f64; 6],
-    },
-    TiePointAndPixelScale {
-        raster_point: Coord,
-        model_point: Coord,
-        pixel_scale: Coord,
-    },
+    AffineTransform(AffineTransform),
+    TiePointAndPixelScale(TiePointAndPixelScale),
     #[cfg(feature = "tie-points")]
-    TiePoints {
-        raster_mesh: Rc<Vec<Face>>,
-        raster_index: OwnedRTree<f64>,
-        model_mesh: Rc<Vec<Face>>,
-        model_index: OwnedRTree<f64>,
-    },
+    TiePoints(tie_points::TiePoints),
 }
 
 impl CoordinateTransform {
@@ -96,7 +74,9 @@ impl CoordinateTransform {
                 )));
             }
 
-            Self::from_transformation_matrix(transformation_matrix)
+            Ok(CoordinateTransform::AffineTransform(
+                AffineTransform::from_tag_matrix(transformation_matrix)?,
+            ))
         } else {
             let Some(tie_points) = tie_points else {
                 return Err(TiffError::FormatError(TiffFormatError::Format(
@@ -111,11 +91,15 @@ impl CoordinateTransform {
                     )));
                 };
 
-                Self::from_tie_point_and_pixel_scale(&tie_points, &pixel_scale)
+                Ok(CoordinateTransform::TiePointAndPixelScale(
+                    TiePointAndPixelScale::from_tag_data(&tie_points, &pixel_scale),
+                ))
             } else {
                 #[cfg(feature = "tie-points")]
                 {
-                    Self::from_tie_points(&tie_points)
+                    Ok(CoordinateTransform::TiePoints(
+                        tie_points::TiePoints::from_tie_points(&tie_points),
+                    ))
                 }
                 #[cfg(not(feature = "tie-points"))]
                 {
@@ -129,51 +113,109 @@ impl CoordinateTransform {
 
     pub fn transform_to_model(&self, coord: &Coord) -> Coord {
         match self {
-            CoordinateTransform::AffineTransform { transform, .. } => {
-                Self::transform_by_affine_transform(transform, coord)
-            }
-            CoordinateTransform::TiePointAndPixelScale {
-                raster_point,
-                model_point,
-                pixel_scale,
-            } => Self::transform_to_model_by_tie_point_and_pixel_scale(
-                raster_point,
-                model_point,
-                pixel_scale,
-                coord,
-            ),
+            CoordinateTransform::AffineTransform(transform) => transform.to_model(coord),
+            CoordinateTransform::TiePointAndPixelScale(transform) => transform.to_model(coord),
             #[cfg(feature = "tie-points")]
-            CoordinateTransform::TiePoints {
-                raster_index,
-                raster_mesh,
-                model_mesh,
-                ..
-            } => Self::transform_by_tie_points(raster_index, raster_mesh, model_mesh, coord),
+            CoordinateTransform::TiePoints(transform) => transform.to_model(coord),
         }
     }
 
     pub(super) fn transform_to_raster(&self, coord: &Coord) -> Coord {
         match self {
-            CoordinateTransform::AffineTransform {
-                inverse_transform, ..
-            } => Self::transform_by_affine_transform(inverse_transform, coord),
-            CoordinateTransform::TiePointAndPixelScale {
-                raster_point,
-                model_point,
-                pixel_scale,
-            } => Self::transform_to_raster_by_tie_point_and_pixel_scale(
-                raster_point,
-                model_point,
-                pixel_scale,
-                coord,
-            ),
+            CoordinateTransform::AffineTransform(transform) => transform.to_raster(coord),
+            CoordinateTransform::TiePointAndPixelScale(transform) => transform.to_raster(coord),
             #[cfg(feature = "tie-points")]
-            CoordinateTransform::TiePoints {
-                model_index,
-                model_mesh,
-                raster_mesh,
-                ..
-            } => Self::transform_by_tie_points(model_index, model_mesh, raster_mesh, coord),
+            CoordinateTransform::TiePoints(transform) => transform.to_raster(coord),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct AffineTransform {
+    transform: [f64; 6],
+    inverse_transform: [f64; 6],
+}
+
+impl AffineTransform {
+    pub fn from_tag_matrix(matrix: [f64; 16]) -> TiffResult<Self> {
+        let transform = [
+            matrix[0], matrix[1], matrix[3], matrix[4], matrix[5], matrix[7],
+        ];
+
+        let det = transform[0] * transform[4] - transform[1] * transform[3];
+        if det.abs() < 0.000000000000001 {
+            return Err(TiffError::FormatError(TiffFormatError::Format(
+                String::from("Provided transformation matrix is not invertible"),
+            )));
+        }
+
+        let inverse_transform = [
+            transform[4] / det,
+            -transform[1] / det,
+            (transform[1] * transform[5] - transform[2] * transform[4]) / det,
+            -transform[3] / det,
+            transform[0] / det,
+            (-transform[0] * transform[5] + transform[2] * transform[3]) / det,
+        ];
+
+        Ok(AffineTransform {
+            transform,
+            inverse_transform,
+        })
+    }
+
+    fn transform(matrix: &[f64; 6], coord: &Coord) -> Coord {
+        Coord {
+            x: coord.x * matrix[0] + coord.y * matrix[1] + matrix[2],
+            y: coord.x * matrix[3] + coord.y * matrix[4] + matrix[5],
+        }
+    }
+
+    pub fn to_model(&self, coord: &Coord) -> Coord {
+        Self::transform(&self.transform, coord)
+    }
+
+    pub fn to_raster(&self, coord: &Coord) -> Coord {
+        Self::transform(&self.inverse_transform, coord)
+    }
+}
+
+#[derive(Debug)]
+pub struct TiePointAndPixelScale {
+    raster_point: Coord,
+    model_point: Coord,
+    pixel_scale: Coord,
+}
+
+impl TiePointAndPixelScale {
+    pub fn from_tag_data(tie_points: &[f64], pixel_scale: &[f64]) -> Self {
+        TiePointAndPixelScale {
+            raster_point: Coord {
+                x: tie_points[0],
+                y: tie_points[1],
+            },
+            model_point: Coord {
+                x: tie_points[3],
+                y: tie_points[4],
+            },
+            pixel_scale: Coord {
+                x: pixel_scale[0],
+                y: pixel_scale[1],
+            },
+        }
+    }
+
+    pub fn to_model(&self, coord: &Coord) -> Coord {
+        Coord {
+            x: (coord.x - self.raster_point.x) * self.pixel_scale.x + self.model_point.x,
+            y: (coord.y - self.raster_point.y) * -self.pixel_scale.y + self.model_point.y,
+        }
+    }
+
+    pub fn to_raster(&self, coord: &Coord) -> Coord {
+        Coord {
+            x: (coord.x - self.model_point.x) / self.pixel_scale.x + self.raster_point.x,
+            y: (coord.y - self.model_point.y) / -self.pixel_scale.y + self.raster_point.y,
         }
     }
 }

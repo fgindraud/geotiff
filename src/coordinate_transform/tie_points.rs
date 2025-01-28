@@ -7,10 +7,16 @@ use geo_index::rtree::{OwnedRTree, RTreeBuilder, RTreeIndex};
 use geo_types::Coord;
 use tiff::TiffResult;
 
-use crate::coordinate_transform::CoordinateTransform;
+#[derive(Debug)]
+pub struct TiePoints {
+    raster_mesh: Rc<Vec<Face>>,
+    raster_index: OwnedRTree<f64>,
+    model_mesh: Rc<Vec<Face>>,
+    model_index: OwnedRTree<f64>,
+}
 
-impl CoordinateTransform {
-    pub(super) fn from_tie_points(tie_points: &[f64]) -> TiffResult<CoordinateTransform> {
+impl TiePoints {
+    pub fn from_tie_points(tie_points: &[f64]) -> Self {
         let capacity = tie_points.iter().len() / 6;
         let mut raster_points = Vec::with_capacity(capacity);
         let mut model_points = Vec::with_capacity(capacity);
@@ -27,172 +33,190 @@ impl CoordinateTransform {
         }
 
         let triangulation = delaunator::triangulate(&raster_points);
-        let raster_mesh = Rc::new(Self::build_faces(raster_points, &triangulation));
-        let model_mesh = Rc::new(Self::build_faces(model_points, &triangulation));
-        let raster_index = Self::build_index(&raster_mesh);
-        let model_index = Self::build_index(&model_mesh);
+        let raster_mesh = Rc::new(build_faces(raster_points, &triangulation));
+        let model_mesh = Rc::new(build_faces(model_points, &triangulation));
+        let raster_index = build_index(&raster_mesh);
+        let model_index = build_index(&model_mesh);
 
-        Ok(Self::TiePoints {
+        TiePoints {
             raster_mesh: raster_mesh.clone(),
             raster_index,
             model_mesh: model_mesh.clone(),
             model_index,
-        })
+        }
     }
 
-    fn build_faces(points: Vec<Point>, triangulation: &Triangulation) -> Vec<Face> {
-        let Triangulation {
-            triangles, hull, ..
-        } = triangulation;
+    pub fn to_model(&self, coord: &Coord) -> Coord {
+        transform_by_tie_points(
+            &self.raster_index,
+            &self.raster_mesh,
+            &self.model_mesh,
+            coord,
+        )
+    }
 
-        let len = hull.len();
-        let mut angle_bisectors = vec![None; points.len()];
-        for i in 0..len {
-            let pi = hull[i];
-            let ci = hull[(i + 1) % len];
-            let ni = hull[(i + 2) % len];
+    pub fn to_raster(&self, coord: &Coord) -> Coord {
+        transform_by_tie_points(
+            &self.model_index,
+            &self.model_mesh,
+            &self.raster_mesh,
+            coord,
+        )
+    }
+}
 
-            let prev = &points[pi];
-            let curr = &points[ci];
-            let next = &points[ni];
+fn transform_by_tie_points(
+    source_index: &OwnedRTree<f64>,
+    source_mesh: &Rc<Vec<Face>>,
+    target_mesh: &Rc<Vec<Face>>,
+    coord: &Coord,
+) -> Coord {
+    let index = source_index
+        .search(coord.x, coord.y, coord.x, coord.y)
+        .into_iter()
+        .find(|face_index| source_mesh[*face_index].contains(coord))
+        .unwrap();
+    let uv = source_mesh[index].locate(coord);
+    target_mesh[index].interpolate(uv)
+}
 
-            let prev_curr = Coord {
-                x: curr.x - prev.x,
-                y: curr.y - prev.y,
-            }
-            .normalize();
-            let next_curr = Coord {
-                x: curr.x - next.x,
-                y: curr.y - next.y,
-            }
-            .normalize();
-            let direction = Coord {
-                x: prev_curr.x + next_curr.x,
-                y: prev_curr.y + next_curr.y,
-            }
-            .normalize();
+fn build_faces(points: Vec<Point>, triangulation: &Triangulation) -> Vec<Face> {
+    let Triangulation {
+        triangles, hull, ..
+    } = triangulation;
 
-            angle_bisectors[ci] = Some(direction);
+    let len = hull.len();
+    let mut angle_bisectors = vec![None; points.len()];
+    for i in 0..len {
+        let pi = hull[i];
+        let ci = hull[(i + 1) % len];
+        let ni = hull[(i + 2) % len];
+
+        let prev = &points[pi];
+        let curr = &points[ci];
+        let next = &points[ni];
+
+        let prev_curr = Coord {
+            x: curr.x - prev.x,
+            y: curr.y - prev.y,
         }
-        triangles
-            .chunks(3)
-            .map(|chunk| {
-                let i1 = chunk[0];
-                let i2 = chunk[1];
-                let i3 = chunk[2];
+        .normalize();
+        let next_curr = Coord {
+            x: curr.x - next.x,
+            y: curr.y - next.y,
+        }
+        .normalize();
+        let direction = Coord {
+            x: prev_curr.x + next_curr.x,
+            y: prev_curr.y + next_curr.y,
+        }
+        .normalize();
 
-                let b12 = hull.as_slice().contains_sequence(&chunk[0..2]);
-                let b23 = hull.as_slice().contains_sequence(&chunk[1..3]);
-                let b31 = hull.as_slice().contains_sequence(&[i3, i1]);
+        angle_bisectors[ci] = Some(direction);
+    }
+    triangles
+        .chunks(3)
+        .map(|chunk| {
+            let i1 = chunk[0];
+            let i2 = chunk[1];
+            let i3 = chunk[2];
 
-                let c1 = Coord {
-                    x: points[i1].x,
-                    y: points[i1].y,
-                };
-                let c2 = Coord {
-                    x: points[i2].x,
-                    y: points[i2].y,
-                };
-                let c3 = Coord {
-                    x: points[i3].x,
-                    y: points[i3].y,
-                };
+            let b12 = hull.as_slice().contains_sequence(&chunk[0..2]);
+            let b23 = hull.as_slice().contains_sequence(&chunk[1..3]);
+            let b31 = hull.as_slice().contains_sequence(&[i3, i1]);
 
-                let boundary = if b12 {
-                    if b23 {
-                        if b31 {
-                            // Open
-                            None
-                        } else {
-                            // Closed at edge 3-1
-                            Some(Boundary::Open {
-                                coords: vec![c3, c1],
-                                from_direction: angle_bisectors[i3].unwrap(),
-                                to_direction: angle_bisectors[i1].unwrap(),
-                            })
-                        }
-                    } else if b31 {
-                        // Closed at edge 2-3
-                        Some(Boundary::Open {
-                            coords: vec![c2, c3],
-                            from_direction: angle_bisectors[i2].unwrap(),
-                            to_direction: angle_bisectors[i3].unwrap(),
-                        })
+            let c1 = Coord {
+                x: points[i1].x,
+                y: points[i1].y,
+            };
+            let c2 = Coord {
+                x: points[i2].x,
+                y: points[i2].y,
+            };
+            let c3 = Coord {
+                x: points[i3].x,
+                y: points[i3].y,
+            };
+
+            let boundary = if b12 {
+                if b23 {
+                    if b31 {
+                        // Open
+                        None
                     } else {
-                        // Closed at edges 2-3 and 3-1
+                        // Closed at edge 3-1
                         Some(Boundary::Open {
-                            coords: vec![c2, c3, c1],
-                            from_direction: angle_bisectors[i2].unwrap(),
+                            coords: vec![c3, c1],
+                            from_direction: angle_bisectors[i3].unwrap(),
                             to_direction: angle_bisectors[i1].unwrap(),
                         })
                     }
-                } else if b23 {
-                    if b31 {
-                        // Closed at edge 1-2
-                        Some(Boundary::Open {
-                            coords: vec![c1, c2],
-                            from_direction: angle_bisectors[i1].unwrap(),
-                            to_direction: angle_bisectors[i2].unwrap(),
-                        })
-                    } else {
-                        // Closed at edges 1-2 and 3-1
-                        Some(Boundary::Open {
-                            coords: vec![c3, c1, c2],
-                            from_direction: angle_bisectors[i3].unwrap(),
-                            to_direction: angle_bisectors[i2].unwrap(),
-                        })
-                    }
                 } else if b31 {
-                    // Closed at edges 1-2 and 2-3
+                    // Closed at edge 2-3
                     Some(Boundary::Open {
-                        coords: vec![c1, c2, c3],
-                        from_direction: angle_bisectors[i1].unwrap(),
+                        coords: vec![c2, c3],
+                        from_direction: angle_bisectors[i2].unwrap(),
                         to_direction: angle_bisectors[i3].unwrap(),
                     })
                 } else {
-                    // Closed
-                    Some(Boundary::Closed {
-                        coords: vec![c1, c2, c3, c1],
+                    // Closed at edges 2-3 and 3-1
+                    Some(Boundary::Open {
+                        coords: vec![c2, c3, c1],
+                        from_direction: angle_bisectors[i2].unwrap(),
+                        to_direction: angle_bisectors[i1].unwrap(),
                     })
-                };
-
-                Face {
-                    boundary,
-                    support_points: array::from_fn(|i| {
-                        let point = &points[chunk[i]];
-                        Coord {
-                            x: point.x,
-                            y: point.y,
-                        }
-                    }),
                 }
-            })
-            .collect()
-    }
+            } else if b23 {
+                if b31 {
+                    // Closed at edge 1-2
+                    Some(Boundary::Open {
+                        coords: vec![c1, c2],
+                        from_direction: angle_bisectors[i1].unwrap(),
+                        to_direction: angle_bisectors[i2].unwrap(),
+                    })
+                } else {
+                    // Closed at edges 1-2 and 3-1
+                    Some(Boundary::Open {
+                        coords: vec![c3, c1, c2],
+                        from_direction: angle_bisectors[i3].unwrap(),
+                        to_direction: angle_bisectors[i2].unwrap(),
+                    })
+                }
+            } else if b31 {
+                // Closed at edges 1-2 and 2-3
+                Some(Boundary::Open {
+                    coords: vec![c1, c2, c3],
+                    from_direction: angle_bisectors[i1].unwrap(),
+                    to_direction: angle_bisectors[i3].unwrap(),
+                })
+            } else {
+                // Closed
+                Some(Boundary::Closed {
+                    coords: vec![c1, c2, c3, c1],
+                })
+            };
 
-    fn build_index(mesh: &[Face]) -> OwnedRTree<f64> {
-        let mut builder = RTreeBuilder::new(mesh.len());
-        for face in mesh.iter() {
-            let (min_x, min_y, max_x, max_y) = face.compute_envelope();
-            builder.add(min_x, min_y, max_x, max_y);
-        }
-        builder.finish::<STRSort>()
-    }
+            Face {
+                boundary,
+                support_points: array::from_fn(|i| {
+                    let point = &points[chunk[i]];
+                    Coord {
+                        x: point.x,
+                        y: point.y,
+                    }
+                }),
+            }
+        })
+        .collect()
+}
 
-    pub(super) fn transform_by_tie_points(
-        source_index: &OwnedRTree<f64>,
-        source_mesh: &Rc<Vec<Face>>,
-        target_mesh: &Rc<Vec<Face>>,
-        coord: &Coord,
-    ) -> Coord {
-        let index = source_index
-            .search(coord.x, coord.y, coord.x, coord.y)
-            .into_iter()
-            .find(|face_index| source_mesh[*face_index].contains(coord))
-            .unwrap();
-        let uv = source_mesh[index].locate(coord);
-        target_mesh[index].interpolate(uv)
+fn build_index(mesh: &[Face]) -> OwnedRTree<f64> {
+    let mut builder = RTreeBuilder::new(mesh.len());
+    for face in mesh.iter() {
+        let (min_x, min_y, max_x, max_y) = face.compute_envelope();
+        builder.add(min_x, min_y, max_x, max_y);
     }
+    builder.finish::<STRSort>()
 }
 
 #[derive(Debug)]
